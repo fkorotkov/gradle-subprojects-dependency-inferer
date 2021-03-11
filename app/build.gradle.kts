@@ -1,8 +1,7 @@
-import org.jetbrains.kotlin.cli.common.arguments.parseCommandLineArguments
-
 plugins {
-    id("org.jetbrains.kotlin.jvm") version "1.4.20"
     application
+    id("org.jetbrains.kotlin.jvm") version "1.4.20"
+    `java-library`
 }
 
 java {
@@ -17,6 +16,7 @@ repositories {
 
 dependencies {
     implementation(platform("org.jetbrains.kotlin:kotlin-bom"))
+    implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable")
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
     implementation("com.google.guava:guava:29.0-jre")
     testImplementation("org.jetbrains.kotlin:kotlin-test")

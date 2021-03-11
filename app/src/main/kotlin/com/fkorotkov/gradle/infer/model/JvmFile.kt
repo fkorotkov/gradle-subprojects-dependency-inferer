@@ -5,5 +5,6 @@ import java.nio.file.Path
 data class JvmFile(
     val path: Path,
     val packageFqName: String,
-    val importedPackages: Set<String> = emptySet()
+    val importedPackages: Set<String> = emptySet(),
+    val transitivePackages: Set<String> = emptySet()
 )

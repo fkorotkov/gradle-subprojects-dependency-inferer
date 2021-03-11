@@ -3,20 +3,21 @@ package com.fkorotkov.gradle.infer
 import com.fkorotkov.gradle.infer.model.JvmFile
 import com.fkorotkov.gradle.infer.model.Project
 import com.google.common.collect.HashMultimap
-import org.jetbrains.kotlin.cli.common.CLIConfigurationKeys
-import org.jetbrains.kotlin.cli.common.messages.MessageRenderer.PLAIN_RELATIVE_PATHS
-import org.jetbrains.kotlin.cli.common.messages.PrintingMessageCollector
-import org.jetbrains.kotlin.cli.jvm.compiler.EnvironmentConfigFiles
-import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment
-import org.jetbrains.kotlin.com.intellij.ide.highlighter.JavaFileType
-import org.jetbrains.kotlin.com.intellij.openapi.util.Disposer
-import org.jetbrains.kotlin.com.intellij.psi.PsiClass
-import org.jetbrains.kotlin.com.intellij.psi.PsiClassOwner
-import org.jetbrains.kotlin.com.intellij.psi.PsiManager
-import org.jetbrains.kotlin.com.intellij.testFramework.LightVirtualFile
-import org.jetbrains.kotlin.config.CompilerConfiguration
+import com.intellij.ide.highlighter.JavaFileType
+import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiManager
+import com.intellij.psi.util.PsiUtil
+import com.intellij.psi.util.PsiUtilCore
+import com.intellij.psi.util.findDescendantOfType
+import com.intellij.testFramework.LightVirtualFile
 import org.jetbrains.kotlin.idea.KotlinFileType
-import java.io.File
+import org.jetbrains.kotlin.idea.quickfix.createFromUsage.callableBuilder.getReturnTypeReference
+import org.jetbrains.kotlin.nj2k.postProcessing.type
+import org.jetbrains.kotlin.psi.KtClass
+import org.jetbrains.kotlin.psi.KtNamedFunction
+import org.jetbrains.kotlin.psi.KtProperty
+import org.jetbrains.kotlin.psi.psiUtil.findDescendantOfType
+import org.jetbrains.kotlin.psi.psiUtil.getSuperNames
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.Path
@@ -39,17 +40,13 @@ val defaultKotlinPackageImports = setOf(
 )
 
 @ExperimentalPathApi
-fun main(args: Array<String>) {
-    println(args.joinToString())
-    val projectRoot = File(
-        args.firstOrNull() ?: throw IllegalStateException("First argument should be a path")
-    ).toPath()
+fun generate(psiManager: PsiManager, projectRoot: Path) {
     val projects = mutableMapOf<String, Project>()
     Files.walkFileTree(projectRoot, object : SimpleFileVisitor<Path>() {
         override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
             if (Files.exists(dir.resolve("build.gradle"))) {
                 val project = Project(projectRoot.relativize(dir))
-                populateProject(project, dir)
+                populateProject(project, psiManager, dir)
                 projects[project.fqn] = project
                 return FileVisitResult.CONTINUE
             }
@@ -91,46 +88,30 @@ fun main(args: Array<String>) {
 }
 
 @ExperimentalPathApi
-private fun populateProject(project: Project, dir: Path) {
-    val configuration = CompilerConfiguration()
-    configuration.put(
-        CLIConfigurationKeys.MESSAGE_COLLECTOR_KEY,
-        PrintingMessageCollector(System.err, PLAIN_RELATIVE_PATHS, false)
-    )
-    val disposable = Disposer.newDisposable()
-    val environment = KotlinCoreEnvironment.createForProduction(
-        disposable,
-        configuration,
-        EnvironmentConfigFiles.JVM_CONFIG_FILES
-    )
-    val psiManager = PsiManager.getInstance(environment.project)
-    try {
-        val src = dir.resolve("src")
-        if (Files.exists(src.resolve("main"))) {
-            Files.walkFileTree(src.resolve("main"), object : SimpleFileVisitor<Path>() {
-                override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                    if (file.extension == "kt" || file.extension == "java") {
-                        project.addFile(parseJvmFile(psiManager, file))
-                    }
-                    if (file.extension == "proto") {
-                        project.addFile(parseProtoFile(file))
-                    }
-                    return FileVisitResult.CONTINUE
+private fun populateProject(project: Project, psiManager: PsiManager, dir: Path) {
+    val src = dir.resolve("src")
+    if (Files.exists(src.resolve("main"))) {
+        Files.walkFileTree(src.resolve("main"), object : SimpleFileVisitor<Path>() {
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                if (file.extension == "kt" || file.extension == "java") {
+                    project.addFile(parseJvmFile(psiManager, file))
                 }
-            })
-        }
-        if (Files.exists(src.resolve("test"))) {
-            Files.walkFileTree(src.resolve("test"), object : SimpleFileVisitor<Path>() {
-                override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                    if (file.extension == "kt" || file.extension == "java") {
-                        project.addTestFile(parseJvmFile(psiManager, file))
-                    }
-                    return FileVisitResult.CONTINUE
+                if (file.extension == "proto") {
+                    project.addFile(parseProtoFile(file))
                 }
-            })
-        }
-    } finally {
-        disposable.dispose()
+                return FileVisitResult.CONTINUE
+            }
+        })
+    }
+    if (Files.exists(src.resolve("test"))) {
+        Files.walkFileTree(src.resolve("test"), object : SimpleFileVisitor<Path>() {
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                if (file.extension == "kt" || file.extension == "java") {
+                    project.addTestFile(parseJvmFile(psiManager, file))
+                }
+                return FileVisitResult.CONTINUE
+            }
+        })
     }
 }
 
@@ -165,14 +146,29 @@ private fun parseJvmFile(psiManager: PsiManager, path: Path): JvmFile {
             Files.readString(path)
         )
     ) ?: throw IllegalStateException()
-    val classOwner = psiFile as? PsiClassOwner
-    val exportedPackages = classOwner?.classes?.map { clazz ->
-        inferExports(importedClassToPackages, clazz)
-    }?.flatten()
-        ?.filter { !it.startsWith("java.") }
-        ?.filter { !defaultKotlinPackageImports.contains(it.substringBeforeLast('.')) }
-        ?: emptyList()
+    val exportedPackages = psiFile.children.mapNotNull { child ->
+        when (child) {
+            is KtClass -> inferKotlinExports(importedClassToPackages, child)
+            is PsiClass -> inferExports(importedClassToPackages, child)
+            else -> emptyList()
+        }
+    }.flatten()
+        .filter { !it.startsWith("java.") }
+        .filter { !defaultKotlinPackageImports.contains(it.substringBeforeLast('.')) }
     return JvmFile(path, packageFqName, importedPackagesFiltered.toSortedSet(), exportedPackages.toSortedSet())
+}
+
+fun inferKotlinExports(importedClassToPackages: Map<String, String>, clazz: KtClass): List<String> {
+    val superNames = clazz.getSuperNames()
+    val superPackages = superNames.mapNotNull { importedClassToPackages[it] }
+    val typeNames = clazz.children.last().children.mapNotNull {
+        when(it) {
+            is KtNamedFunction -> it.typeReference?.text?.substringBefore('<')
+            is KtProperty -> it.typeReference?.text?.substringBefore('<')
+            else -> null
+        }
+    }.mapNotNull { importedClassToPackages[it] }
+    return superPackages + typeNames
 }
 
 fun inferExports(importedClassToPackages: Map<String, String>, clazz: PsiClass): List<String> {
@@ -186,7 +182,7 @@ fun inferExports(importedClassToPackages: Map<String, String>, clazz: PsiClass):
         clazz.allMethods?.mapNotNull {
             it.returnType?.canonicalText
         }?.mapNotNull { importedClassToPackages[it] } ?: emptyList<String>()
-    } catch(th: Throwable) {
+    } catch (th: Throwable) {
         System.err.println("Failed to infer method return types for ${clazz.name}")
         emptyList<String>()
     }

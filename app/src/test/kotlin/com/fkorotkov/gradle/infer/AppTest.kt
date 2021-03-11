@@ -3,12 +3,17 @@
  */
 package com.fkorotkov.gradle.infer
 
+import com.intellij.psi.PsiManager
+import com.intellij.testFramework.fixtures.LightJavaCodeInsightFixtureTestCase
+import kotlin.io.path.ExperimentalPathApi
+import kotlin.io.path.Path
 import kotlin.test.Test
-import kotlin.test.assertNotNull
 
-class AppTest {
-    @Test fun testAppHasAGreeting() {
-        val classUnderTest = App()
-        assertNotNull(classUnderTest.greeting, "app should have a greeting")
+class AppTest : LightJavaCodeInsightFixtureTestCase() {
+    @ExperimentalPathApi
+    @Test
+    fun testGeneration() {
+        val psiManager = PsiManager.getInstance(project)
+        generate(psiManager, Path("/Users/fedor/workspace/cirrus-ci"))
     }
 }

@@ -161,7 +161,7 @@ private fun parseJvmFile(psiManager: PsiManager, path: Path): JvmFile {
 fun inferKotlinExports(importedClassToPackages: Map<String, String>, clazz: KtClass): List<String> {
     val superNames = clazz.getSuperNames()
     val superPackages = superNames.mapNotNull { importedClassToPackages[it] }
-    val typeNames = clazz.children.last().children.mapNotNull {
+    val typeNames = (clazz.children.lastOrNull()?.children ?: emptyArray()).mapNotNull {
         when(it) {
             is KtNamedFunction -> it.typeReference?.text?.substringBefore('<')
             is KtProperty -> it.typeReference?.text?.substringBefore('<')
